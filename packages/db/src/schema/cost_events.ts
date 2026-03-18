@@ -12,7 +12,7 @@ export const costEvents = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id),
     agentId: uuid("agent_id").notNull().references(() => agents.id),
     issueId: uuid("issue_id").references(() => issues.id),
-    projectId: uuid("project_id").references(() => projects.id),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
     billingCode: text("billing_code"),
     provider: text("provider").notNull(),
