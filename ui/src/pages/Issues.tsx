@@ -92,6 +92,14 @@ export function Issues() {
     },
   });
 
+  const bulkUpdateIssues = useMutation({
+    mutationFn: ({ ids, data }: { ids: string[]; data: Record<string, unknown> }) =>
+      issuesApi.bulkUpdate(ids, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(selectedCompanyId!) });
+    },
+  });
+
   if (!selectedCompanyId) {
     return <EmptyState icon={CircleDot} message="Select a company to view issues." />;
   }
@@ -109,6 +117,7 @@ export function Issues() {
       initialSearch={initialSearch}
       onSearchChange={handleSearchChange}
       onUpdateIssue={(id, data) => updateIssue.mutate({ id, data })}
+      onBulkUpdateIssues={(ids, data) => bulkUpdateIssues.mutate({ ids, data })}
     />
   );
 }

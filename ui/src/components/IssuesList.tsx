@@ -158,6 +158,7 @@ interface IssuesListProps {
   initialSearch?: string;
   onSearchChange?: (search: string) => void;
   onUpdateIssue: (id: string, data: Record<string, unknown>) => void;
+  onBulkUpdateIssues?: (ids: string[], data: Record<string, unknown>) => void;
 }
 
 export function IssuesList({
@@ -173,6 +174,7 @@ export function IssuesList({
   initialSearch,
   onSearchChange,
   onUpdateIssue,
+  onBulkUpdateIssues,
 }: IssuesListProps) {
   const { selectedCompanyId } = useCompany();
   const { openNewIssue } = useDialog();
@@ -191,8 +193,11 @@ export function IssuesList({
     }
     return getViewState(scopedKey);
   });
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [assigneePickerIssueId, setAssigneePickerIssueId] = useState<string | null>(null);
   const [assigneeSearch, setAssigneeSearch] = useState("");
+  const [bulkAssigneePickerOpen, setBulkAssigneePickerOpen] = useState(false);
+  const [bulkAssigneeSearch, setBulkAssigneeSearch] = useState("");
   const [issueSearch, setIssueSearch] = useState(initialSearch ?? "");
   const [debouncedIssueSearch, setDebouncedIssueSearch] = useState(issueSearch);
   const normalizedIssueSearch = debouncedIssueSearch.trim();
@@ -304,6 +309,43 @@ export function IssuesList({
     setAssigneePickerIssueId(null);
     setAssigneeSearch("");
   };
+
+  const toggleSelect = useCallback((issueId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(issueId)) next.delete(issueId);
+      else next.add(issueId);
+      return next;
+    });
+  }, []);
+
+  const selectAllVisible = useCallback(() => {
+    setSelectedIds(new Set(filtered.map((i) => i.id)));
+  }, [filtered]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+  }, []);
+
+  const selectionCount = selectedIds.size;
+  const allVisibleSelected = filtered.length > 0 && filtered.every((i) => selectedIds.has(i.id));
+
+  const bulkUpdate = useCallback((data: Record<string, unknown>) => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (onBulkUpdateIssues) {
+      onBulkUpdateIssues(ids, data);
+    } else {
+      ids.forEach((id) => onUpdateIssue(id, data));
+    }
+    setSelectedIds(new Set());
+  }, [selectedIds, onBulkUpdateIssues, onUpdateIssue]);
+
+  const bulkAssign = useCallback((assigneeAgentId: string | null, assigneeUserId: string | null = null) => {
+    bulkUpdate({ assigneeAgentId, assigneeUserId });
+    setBulkAssigneePickerOpen(false);
+    setBulkAssigneeSearch("");
+  }, [bulkUpdate]);
 
   return (
     <div className="space-y-4">
@@ -580,6 +622,159 @@ export function IssuesList({
         </div>
       </div>
 
+      {/* Bulk action toolbar */}
+      {selectionCount > 0 && viewState.viewMode === "list" && (
+        <div className="flex items-center gap-2 rounded-md border border-border bg-accent/50 px-3 py-2">
+          <Checkbox
+            checked={allVisibleSelected}
+            onCheckedChange={() => (allVisibleSelected ? clearSelection() : selectAllVisible())}
+            aria-label="Select all visible issues"
+          />
+          <span className="text-sm font-medium">
+            {selectionCount} selected
+          </span>
+          <div className="ml-2 flex items-center gap-1">
+            {/* Bulk status change */}
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" className="text-xs h-7">
+                  Status
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-44 p-1">
+                {statusOrder.map((s) => (
+                  <button
+                    key={s}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50"
+                    onClick={() => bulkUpdate({ status: s })}
+                  >
+                    <StatusIcon status={s} />
+                    <span>{statusLabel(s)}</span>
+                  </button>
+                ))}
+              </PopoverContent>
+            </Popover>
+
+            {/* Bulk priority change */}
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" className="text-xs h-7">
+                  Priority
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-40 p-1">
+                {priorityOrder.map((p) => (
+                  <button
+                    key={p}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50"
+                    onClick={() => bulkUpdate({ priority: p })}
+                  >
+                    <PriorityIcon priority={p} />
+                    <span>{statusLabel(p)}</span>
+                  </button>
+                ))}
+              </PopoverContent>
+            </Popover>
+
+            {/* Bulk assignee change */}
+            <Popover
+              open={bulkAssigneePickerOpen}
+              onOpenChange={(open) => {
+                setBulkAssigneePickerOpen(open);
+                if (!open) setBulkAssigneeSearch("");
+              }}
+            >
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" className="text-xs h-7">
+                  Assignee
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-56 p-1" onClick={(e) => e.stopPropagation()}>
+                <input
+                  className="mb-1 w-full border-b border-border bg-transparent px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground/50"
+                  placeholder="Search assignees..."
+                  value={bulkAssigneeSearch}
+                  onChange={(e) => setBulkAssigneeSearch(e.target.value)}
+                  autoFocus
+                />
+                <div className="max-h-48 overflow-y-auto overscroll-contain">
+                  <button
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50"
+                    onClick={() => bulkAssign(null, null)}
+                  >
+                    No assignee
+                  </button>
+                  {currentUserId && (
+                    <button
+                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent/50"
+                      onClick={() => bulkAssign(null, currentUserId)}
+                    >
+                      <User className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span>Me</span>
+                    </button>
+                  )}
+                  {(agents ?? [])
+                    .filter((agent) => {
+                      if (!bulkAssigneeSearch.trim()) return true;
+                      return agent.name.toLowerCase().includes(bulkAssigneeSearch.toLowerCase());
+                    })
+                    .map((agent) => (
+                      <button
+                        key={agent.id}
+                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent/50"
+                        onClick={() => bulkAssign(agent.id, null)}
+                      >
+                        <Identity name={agent.name} size="sm" className="min-w-0" />
+                      </button>
+                    ))}
+                </div>
+              </PopoverContent>
+            </Popover>
+
+            {/* Bulk label change */}
+            {labels && labels.length > 0 && (
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="sm" className="text-xs h-7">
+                    Label
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-48 p-1">
+                  <div className="max-h-48 overflow-y-auto overscroll-contain">
+                    {labels.map((label) => (
+                      <button
+                        key={label.id}
+                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50"
+                        onClick={() => {
+                          const ids = Array.from(selectedIds);
+                          ids.forEach((id) => {
+                            const issue = filtered.find((i) => i.id === id);
+                            const currentLabelIds = issue?.labelIds ?? [];
+                            const newLabelIds = currentLabelIds.includes(label.id)
+                              ? currentLabelIds.filter((lid) => lid !== label.id)
+                              : [...currentLabelIds, label.id];
+                            onUpdateIssue(id, { labelIds: newLabelIds });
+                          });
+                          setSelectedIds(new Set());
+                        }}
+                      >
+                        <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: label.color }} />
+                        <span>{label.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
+          </div>
+
+          <Button variant="ghost" size="sm" className="ml-auto text-xs h-7" onClick={clearSelection}>
+            <X className="h-3 w-3 mr-1" />
+            Clear
+          </Button>
+        </div>
+      )}
+
       {isLoading && <PageSkeleton variant="issues-list" />}
       {error && <p className="text-sm text-destructive">{error.message}</p>}
 
@@ -600,7 +795,8 @@ export function IssuesList({
           onUpdateIssue={onUpdateIssue}
         />
       ) : (
-        groupedContent.map((group) => (
+        <>
+        {groupedContent.map((group) => (
           <Collapsible
             key={group.key}
             open={!viewState.collapsedGroups.includes(group.key)}
@@ -636,7 +832,10 @@ export function IssuesList({
                   key={issue.id}
                   issue={issue}
                   issueLinkState={issueLinkState}
-                  desktopLeadingSpacer
+                  selectable
+                  selected={selectedIds.has(issue.id)}
+                  onSelectToggle={toggleSelect}
+                  desktopLeadingSpacer={!selectedIds.size}
                   mobileLeading={(
                     <span
                       onClick={(e) => {
@@ -818,7 +1017,8 @@ export function IssuesList({
               ))}
             </CollapsibleContent>
           </Collapsible>
-        ))
+        ))}
+        </>
       )}
     </div>
   );

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { Issue } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { cn } from "../lib/utils";
+import { Checkbox } from "@/components/ui/checkbox";
 import { PriorityIcon } from "./PriorityIcon";
 import { StatusIcon } from "./StatusIcon";
 
@@ -19,6 +20,9 @@ interface IssueRowProps {
   unreadState?: UnreadState | null;
   onMarkRead?: () => void;
   className?: string;
+  selectable?: boolean;
+  selected?: boolean;
+  onSelectToggle?: (issueId: string) => void;
 }
 
 export function IssueRow({
@@ -33,6 +37,9 @@ export function IssueRow({
   unreadState = null,
   onMarkRead,
   className,
+  selectable = false,
+  selected = false,
+  onSelectToggle,
 }: IssueRowProps) {
   const issuePathId = issue.identifier ?? issue.id;
   const identifier = issue.identifier ?? issue.id.slice(0, 8);
@@ -40,14 +47,34 @@ export function IssueRow({
   const showUnreadDot = unreadState === "visible" || unreadState === "fading";
 
   return (
-    <Link
-      to={`/issues/${issuePathId}`}
-      state={issueLinkState}
-      className={cn(
-        "flex items-start gap-2 border-b border-border py-2.5 pl-2 pr-3 text-sm no-underline text-inherit transition-colors hover:bg-accent/50 last:border-b-0 sm:items-center sm:py-2 sm:pl-1",
-        className,
+    <div className={cn(
+      "flex items-start gap-0 border-b border-border text-sm transition-colors hover:bg-accent/50 last:border-b-0 sm:items-center",
+      selected && "bg-accent/30",
+      className,
+    )}>
+      {selectable && (
+        <span
+          className="hidden shrink-0 items-center justify-center sm:flex sm:w-8 sm:pl-1"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+        >
+          <Checkbox
+            checked={selected}
+            onCheckedChange={() => onSelectToggle?.(issue.id)}
+            aria-label={`Select ${issue.title}`}
+          />
+        </span>
       )}
-    >
+      <Link
+        to={`/issues/${issuePathId}`}
+        state={issueLinkState}
+        className={cn(
+          "flex min-w-0 flex-1 items-start gap-2 py-2.5 pr-3 text-sm no-underline text-inherit sm:items-center sm:py-2",
+          selectable ? "pl-2 sm:pl-0" : "pl-2 sm:pl-1",
+        )}
+      >
       <span className="shrink-0 pt-px sm:hidden">
         {mobileLeading ?? <StatusIcon status={issue.status} />}
       </span>
@@ -123,5 +150,6 @@ export function IssueRow({
         </span>
       ) : null}
     </Link>
+    </div>
   );
 }
