@@ -55,6 +55,8 @@ export {
   type CreateProjectWorkspace,
   type UpdateProjectWorkspace,
   type ProjectExecutionWorkspacePolicy,
+  moveProjectSchema,
+  type MoveProject,
 } from "./project.js";
 
 export {

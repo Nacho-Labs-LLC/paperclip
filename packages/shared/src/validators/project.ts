@@ -83,3 +83,10 @@ export const updateProjectSchema = z.object(projectFields).partial();
 export type UpdateProject = z.infer<typeof updateProjectSchema>;
 
 export type ProjectExecutionWorkspacePolicy = z.infer<typeof projectExecutionWorkspacePolicySchema>;
+
+export const moveProjectSchema = z.object({
+  targetCompanyId: z.string().uuid(),
+  moveIssues: z.boolean().optional().default(false),
+});
+
+export type MoveProject = z.infer<typeof moveProjectSchema>;

@@ -164,6 +164,8 @@ export {
   type CreateProjectWorkspace,
   type UpdateProjectWorkspace,
   projectExecutionWorkspacePolicySchema,
+  moveProjectSchema,
+  type MoveProject,
   createIssueSchema,
   createIssueLabelSchema,
   updateIssueSchema,
