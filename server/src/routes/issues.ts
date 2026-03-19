@@ -8,6 +8,7 @@ import {
   checkoutIssueSchema,
   createIssueSchema,
   linkIssueApprovalSchema,
+  moveIssueSchema,
   updateIssueSchema,
 } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
@@ -781,6 +782,74 @@ export function issueRoutes(db: Db, storage: StorageService) {
     });
 
     res.json(released);
+  });
+
+  router.post("/issues/:id/move", validate(moveIssueSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+
+    // Permission: only board users or CEO agents can move issues
+    if (req.actor.type === "agent") {
+      if (!req.actor.agentId) {
+        res.status(403).json({ error: "Agent authentication required" });
+        return;
+      }
+      const actorAgent = await agentsSvc.getById(req.actor.agentId);
+      if (!actorAgent || actorAgent.companyId !== issue.companyId) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (actorAgent.role !== "ceo" && !canCreateAgentsLegacy(actorAgent)) {
+        res.status(403).json({ error: "Only CEO agents or company admins can move issues" });
+        return;
+      }
+    } else if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    // If cross-company move, validate access to target company too
+    if (req.body.targetCompanyId && req.body.targetCompanyId !== issue.companyId) {
+      assertCompanyAccess(req, req.body.targetCompanyId);
+    }
+
+    const result = await svc.move(id, req.body);
+    const actor = getActorInfo(req);
+
+    await logActivity(db, {
+      companyId: result.sourceCompanyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.moved",
+      entityType: "issue",
+      entityId: id,
+      details: {
+        sourceCompanyId: result.sourceCompanyId,
+        targetCompanyId: result.targetCompanyId,
+        movedIssues: result.movedIssues.map((m) => ({
+          id: m.id,
+          oldIdentifier: m.oldIdentifier,
+          newIdentifier: m.newIdentifier,
+          assigneeUnassigned: m.assigneeUnassigned,
+        })),
+      },
+    });
+
+    // Add system comments for unassigned agents
+    for (const moved of result.movedIssues) {
+      if (moved.assigneeUnassigned) {
+        await svc.addComment(moved.id, `Assignee was removed during move from ${moved.oldIdentifier ?? moved.id} — agent does not exist in target company.`, {});
+      }
+    }
+
+    res.json(result.issue);
   });
 
   router.get("/issues/:id/comments", async (req, res) => {

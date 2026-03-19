@@ -7,6 +7,8 @@ import {
   companyMemberships,
   goals,
   heartbeatRuns,
+  costEvents,
+  issueApprovals,
   issueAttachments,
   issueLabels,
   issueComments,
@@ -1439,6 +1441,230 @@ export function issueService(db: Db) {
         project: a.projectId ? projectMap.get(a.projectId) ?? null : null,
         goal: a.goalId ? goalMap.get(a.goalId) ?? null : null,
       }));
+    },
+
+    move: async (
+      issueId: string,
+      input: { targetCompanyId?: string; targetProjectId?: string | null; targetGoalId?: string | null },
+    ) => {
+      const issue = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      if (!issue) throw notFound("Issue not found");
+
+      const sourceCompanyId = issue.companyId;
+      const targetCompanyId = input.targetCompanyId ?? sourceCompanyId;
+      const isCrossCompany = targetCompanyId !== sourceCompanyId;
+
+      // Validate target company exists
+      if (isCrossCompany) {
+        const targetCompany = await db
+          .select({ id: companies.id })
+          .from(companies)
+          .where(eq(companies.id, targetCompanyId))
+          .then((rows) => rows[0] ?? null);
+        if (!targetCompany) throw unprocessable("Target company not found");
+      }
+
+      // Validate target project if specified
+      if (input.targetProjectId) {
+        const project = await db
+          .select({ id: projects.id })
+          .from(projects)
+          .where(and(eq(projects.id, input.targetProjectId), eq(projects.companyId, targetCompanyId)))
+          .then((rows) => rows[0] ?? null);
+        if (!project) throw unprocessable("Target project not found in target company");
+      }
+
+      // Validate target goal if specified
+      if (input.targetGoalId) {
+        const goal = await db
+          .select({ id: goals.id })
+          .from(goals)
+          .where(and(eq(goals.id, input.targetGoalId), eq(goals.companyId, targetCompanyId)))
+          .then((rows) => rows[0] ?? null);
+        if (!goal) throw unprocessable("Target goal not found in target company");
+      }
+
+      // Collect full subtree (recursive children)
+      const subtreeIds: string[] = [];
+      const collectChildren = async (parentId: string) => {
+        const children = await db
+          .select({ id: issues.id, checkoutRunId: issues.checkoutRunId })
+          .from(issues)
+          .where(eq(issues.parentId, parentId));
+        for (const child of children) {
+          if (child.checkoutRunId) {
+            throw conflict(`Child issue ${child.id} is currently checked out; cannot move`);
+          }
+          subtreeIds.push(child.id);
+          await collectChildren(child.id);
+        }
+      };
+
+      // Check root issue checkout
+      if (issue.checkoutRunId) {
+        throw conflict("Issue is currently checked out; cannot move");
+      }
+      await collectChildren(issueId);
+
+      // All IDs to move (root + subtree)
+      const allIssueIds = [issueId, ...subtreeIds];
+
+      return db.transaction(async (tx) => {
+        const movedIssues: Array<{
+          id: string;
+          oldIdentifier: string | null;
+          newIdentifier: string;
+          assigneeUnassigned: boolean;
+        }> = [];
+
+        for (const id of allIssueIds) {
+          const row = await tx
+            .select()
+            .from(issues)
+            .where(eq(issues.id, id))
+            .then((rows) => rows[0]!);
+
+          const oldIdentifier = row.identifier;
+          let assigneeUnassigned = false;
+
+          // For cross-company moves: generate new identifier, validate agent
+          let newIdentifier = oldIdentifier;
+          let newIssueNumber = row.issueNumber;
+
+          if (isCrossCompany) {
+            // Generate new identifier in target company
+            const [company] = await tx
+              .update(companies)
+              .set({ issueCounter: sql`${companies.issueCounter} + 1` })
+              .where(eq(companies.id, targetCompanyId))
+              .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
+            newIssueNumber = company.issueCounter;
+            newIdentifier = `${company.issuePrefix}-${newIssueNumber}`;
+
+            // Validate assignee agent exists in target company
+            if (row.assigneeAgentId) {
+              const agentInTarget = await tx
+                .select({ id: agents.id })
+                .from(agents)
+                .where(and(eq(agents.id, row.assigneeAgentId), eq(agents.companyId, targetCompanyId)))
+                .then((rows) => rows[0] ?? null);
+              if (!agentInTarget) {
+                assigneeUnassigned = true;
+              }
+            }
+          }
+
+          // Determine target project/goal for this issue
+          let targetProjectId: string | null;
+          let targetGoalId: string | null;
+
+          if (id === issueId) {
+            // Root issue: use provided targets or clear
+            targetProjectId = input.targetProjectId !== undefined ? (input.targetProjectId ?? null) : (isCrossCompany ? null : row.projectId);
+            targetGoalId = input.targetGoalId !== undefined ? (input.targetGoalId ?? null) : (isCrossCompany ? null : row.goalId);
+          } else {
+            // Child issues: clear project/goal on cross-company, keep on same-company
+            targetProjectId = isCrossCompany ? null : row.projectId;
+            targetGoalId = isCrossCompany ? null : row.goalId;
+          }
+
+          const patch: Partial<typeof issues.$inferInsert> = {
+            companyId: targetCompanyId,
+            identifier: newIdentifier,
+            issueNumber: newIssueNumber,
+            projectId: targetProjectId,
+            goalId: targetGoalId,
+            updatedAt: new Date(),
+          };
+
+          if (assigneeUnassigned) {
+            patch.assigneeAgentId = null;
+            patch.checkoutRunId = null;
+            patch.executionRunId = null;
+            patch.executionAgentNameKey = null;
+            patch.executionLockedAt = null;
+          }
+
+          await tx.update(issues).set(patch).where(eq(issues.id, id));
+
+          movedIssues.push({
+            id,
+            oldIdentifier,
+            newIdentifier: newIdentifier ?? oldIdentifier ?? id,
+            assigneeUnassigned,
+          });
+        }
+
+        if (isCrossCompany) {
+          // Update comments companyId
+          if (allIssueIds.length > 0) {
+            await tx
+              .update(issueComments)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueComments.issueId, allIssueIds));
+          }
+
+          // Re-link cost events to target company
+          if (allIssueIds.length > 0) {
+            await tx
+              .update(costEvents)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(costEvents.issueId, allIssueIds));
+          }
+
+          // Update issue_approvals companyId
+          if (allIssueIds.length > 0) {
+            await tx
+              .update(issueApprovals)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueApprovals.issueId, allIssueIds));
+          }
+
+          // Update attachments companyId
+          if (allIssueIds.length > 0) {
+            await tx
+              .update(issueAttachments)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueAttachments.issueId, allIssueIds));
+          }
+
+          // Update issue labels companyId
+          if (allIssueIds.length > 0) {
+            await tx
+              .update(issueLabels)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueLabels.issueId, allIssueIds));
+          }
+
+          // Update read states companyId
+          if (allIssueIds.length > 0) {
+            await tx
+              .update(issueReadStates)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueReadStates.issueId, allIssueIds));
+          }
+        }
+
+        // Fetch the updated root issue
+        const updated = await tx
+          .select()
+          .from(issues)
+          .where(eq(issues.id, issueId))
+          .then((rows) => rows[0] ?? null);
+        if (!updated) throw notFound("Issue not found after move");
+
+        const [enriched] = await withIssueLabels(tx, [updated]);
+        return {
+          issue: enriched,
+          movedIssues,
+          sourceCompanyId,
+          targetCompanyId,
+        };
+      });
     },
   };
 }

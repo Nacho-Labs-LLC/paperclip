@@ -76,6 +76,22 @@ export const addIssueCommentSchema = z.object({
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
 
+export const moveIssueSchema = z
+  .object({
+    targetCompanyId: z.string().uuid().optional(),
+    targetProjectId: z.string().uuid().optional().nullable(),
+    targetGoalId: z.string().uuid().optional().nullable(),
+  })
+  .refine(
+    (data) =>
+      data.targetCompanyId !== undefined ||
+      data.targetProjectId !== undefined ||
+      data.targetGoalId !== undefined,
+    { message: "At least one of targetCompanyId, targetProjectId, or targetGoalId is required" },
+  );
+
+export type MoveIssue = z.infer<typeof moveIssueSchema>;
+
 export const linkIssueApprovalSchema = z.object({
   approvalId: z.string().uuid(),
 });
