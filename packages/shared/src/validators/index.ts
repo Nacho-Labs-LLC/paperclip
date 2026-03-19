@@ -55,6 +55,8 @@ export {
   type CreateProjectWorkspace,
   type UpdateProjectWorkspace,
   type ProjectExecutionWorkspacePolicy,
+  moveProjectSchema,
+  type MoveProject,
 } from "./project.js";
 
 export {
@@ -65,6 +67,7 @@ export {
   checkoutIssueSchema,
   addIssueCommentSchema,
   linkIssueApprovalSchema,
+  moveIssueSchema,
   createIssueAttachmentMetadataSchema,
   type CreateIssue,
   type CreateIssueLabel,
@@ -73,6 +76,7 @@ export {
   type CheckoutIssue,
   type AddIssueComment,
   type LinkIssueApproval,
+  type MoveIssue,
   type CreateIssueAttachmentMetadata,
 } from "./issue.js";
 

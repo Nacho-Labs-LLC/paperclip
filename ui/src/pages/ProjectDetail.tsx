@@ -174,6 +174,15 @@ function ProjectIssuesList({ projectId, companyId }: { projectId: string; compan
     },
   });
 
+  const bulkUpdateIssues = useMutation({
+    mutationFn: ({ ids, data }: { ids: string[]; data: Record<string, unknown> }) =>
+      issuesApi.bulkUpdate(ids, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.listByProject(companyId, projectId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(companyId) });
+    },
+  });
+
   return (
     <IssuesList
       issues={issues ?? []}
@@ -184,6 +193,7 @@ function ProjectIssuesList({ projectId, companyId }: { projectId: string; compan
       projectId={projectId}
       viewStateKey={`paperclip:project-view:${projectId}`}
       onUpdateIssue={(id, data) => updateIssue.mutate({ id, data })}
+      onBulkUpdateIssues={(ids, data) => bulkUpdateIssues.mutate({ ids, data })}
     />
   );
 }

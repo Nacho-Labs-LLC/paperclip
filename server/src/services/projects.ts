@@ -1,6 +1,21 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { projects, projectGoals, goals, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
+import {
+  agents,
+  companies,
+  costEvents,
+  goals,
+  issueApprovals,
+  issueAttachments,
+  issueComments,
+  issueLabels,
+  issueReadStates,
+  issues,
+  projectGoals,
+  projects,
+  projectWorkspaces,
+  workspaceRuntimeServices,
+} from "@paperclipai/db";
 import {
   PROJECT_COLORS,
   deriveProjectUrlKey,
@@ -11,6 +26,7 @@ import {
   type ProjectWorkspace,
   type WorkspaceRuntimeService,
 } from "@paperclipai/shared";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import { listWorkspaceRuntimeServicesForProjectWorkspaces } from "./workspace-runtime.js";
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
 
@@ -749,6 +765,194 @@ export function projectService(db: Db) {
         return { project: null, ambiguous: true } as const;
       }
       return { project: null, ambiguous: false } as const;
+    },
+
+    move: async (
+      projectId: string,
+      input: { targetCompanyId: string; moveIssues?: boolean },
+    ) => {
+      const project = await db
+        .select()
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .then((rows) => rows[0] ?? null);
+      if (!project) throw notFound("Project not found");
+
+      const sourceCompanyId = project.companyId;
+      const targetCompanyId = input.targetCompanyId;
+
+      if (targetCompanyId === sourceCompanyId) {
+        throw unprocessable("Project is already in the target company");
+      }
+
+      // Validate target company exists
+      const targetCompany = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(eq(companies.id, targetCompanyId))
+        .then((rows) => rows[0] ?? null);
+      if (!targetCompany) throw unprocessable("Target company not found");
+
+      // Resolve unique name in target company
+      const existingProjects = await db
+        .select({ id: projects.id, name: projects.name })
+        .from(projects)
+        .where(eq(projects.companyId, targetCompanyId));
+      const resolvedName = resolveProjectNameForUniqueShortname(project.name, existingProjects);
+
+      // Collect issues under this project if moveIssues is requested
+      const projectIssueIds: string[] = [];
+      if (input.moveIssues) {
+        const projectIssues = await db
+          .select({ id: issues.id, checkoutRunId: issues.checkoutRunId })
+          .from(issues)
+          .where(eq(issues.projectId, projectId));
+        for (const issue of projectIssues) {
+          if (issue.checkoutRunId) {
+            throw conflict(`Issue ${issue.id} in project is currently checked out; cannot move`);
+          }
+          projectIssueIds.push(issue.id);
+        }
+      }
+
+      return db.transaction(async (tx) => {
+        // Update the project's companyId and name
+        const updatedRow = await tx
+          .update(projects)
+          .set({
+            companyId: targetCompanyId,
+            name: resolvedName,
+            updatedAt: new Date(),
+          })
+          .where(eq(projects.id, projectId))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!updatedRow) throw notFound("Project not found after move");
+
+        // Move workspace references
+        await tx
+          .update(projectWorkspaces)
+          .set({ companyId: targetCompanyId, updatedAt: new Date() })
+          .where(eq(projectWorkspaces.projectId, projectId));
+
+        // Clear goal links (goals are company-scoped, don't transfer)
+        await tx.delete(projectGoals).where(eq(projectGoals.projectId, projectId));
+        await tx
+          .update(projects)
+          .set({ goalId: null })
+          .where(eq(projects.id, projectId));
+
+        // Move issues if requested
+        const movedIssues: Array<{
+          id: string;
+          oldIdentifier: string | null;
+          newIdentifier: string;
+          assigneeUnassigned: boolean;
+        }> = [];
+
+        if (input.moveIssues && projectIssueIds.length > 0) {
+          for (const issueId of projectIssueIds) {
+            const row = await tx
+              .select()
+              .from(issues)
+              .where(eq(issues.id, issueId))
+              .then((rows) => rows[0]!);
+
+            const oldIdentifier = row.identifier;
+
+            // Generate new identifier in target company
+            const [company] = await tx
+              .update(companies)
+              .set({ issueCounter: sql`${companies.issueCounter} + 1` })
+              .where(eq(companies.id, targetCompanyId))
+              .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
+            const newIssueNumber = company.issueCounter;
+            const newIdentifier = `${company.issuePrefix}-${newIssueNumber}`;
+
+            // Validate assignee agent exists in target company
+            let assigneeUnassigned = false;
+            if (row.assigneeAgentId) {
+              const agentInTarget = await tx
+                .select({ id: agents.id })
+                .from(agents)
+                .where(and(eq(agents.id, row.assigneeAgentId), eq(agents.companyId, targetCompanyId)))
+                .then((rows) => rows[0] ?? null);
+              if (!agentInTarget) {
+                assigneeUnassigned = true;
+              }
+            }
+
+            const patch: Partial<typeof issues.$inferInsert> = {
+              companyId: targetCompanyId,
+              identifier: newIdentifier,
+              issueNumber: newIssueNumber,
+              goalId: null,
+              updatedAt: new Date(),
+            };
+
+            if (assigneeUnassigned) {
+              patch.assigneeAgentId = null;
+              patch.checkoutRunId = null;
+              patch.executionRunId = null;
+              patch.executionAgentNameKey = null;
+              patch.executionLockedAt = null;
+            }
+
+            await tx.update(issues).set(patch).where(eq(issues.id, issueId));
+
+            movedIssues.push({
+              id: issueId,
+              oldIdentifier,
+              newIdentifier,
+              assigneeUnassigned,
+            });
+          }
+
+          // Update related data for moved issues
+          if (projectIssueIds.length > 0) {
+            await tx
+              .update(issueComments)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueComments.issueId, projectIssueIds));
+
+            await tx
+              .update(costEvents)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(costEvents.issueId, projectIssueIds));
+
+            await tx
+              .update(issueApprovals)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueApprovals.issueId, projectIssueIds));
+
+            await tx
+              .update(issueAttachments)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueAttachments.issueId, projectIssueIds));
+
+            await tx
+              .update(issueLabels)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueLabels.issueId, projectIssueIds));
+
+            await tx
+              .update(issueReadStates)
+              .set({ companyId: targetCompanyId })
+              .where(inArray(issueReadStates.issueId, projectIssueIds));
+          }
+        }
+
+        // Fetch the updated project with enrichments
+        const [withGoals] = await attachGoals(tx as unknown as Db, [updatedRow]);
+        const [enriched] = withGoals ? await attachWorkspaces(tx as unknown as Db, [withGoals]) : [];
+
+        return {
+          project: enriched ?? updatedRow,
+          movedIssues,
+          sourceCompanyId,
+          targetCompanyId,
+        };
+      });
     },
   };
 }

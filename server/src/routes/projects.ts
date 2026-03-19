@@ -4,17 +4,19 @@ import {
   createProjectSchema,
   createProjectWorkspaceSchema,
   isUuidLike,
+  moveProjectSchema,
   updateProjectSchema,
   updateProjectWorkspaceSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
-import { projectService, logActivity } from "../services/index.js";
+import { agentService, projectService, logActivity } from "../services/index.js";
 import { conflict } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
 export function projectRoutes(db: Db) {
   const router = Router();
   const svc = projectService(db);
+  const agentsSvc = agentService(db);
 
   async function resolveCompanyIdForProjectReference(req: Request) {
     const companyIdQuery = req.query.companyId;
@@ -256,6 +258,65 @@ export function projectRoutes(db: Db) {
     });
 
     res.json(workspace);
+  });
+
+  router.post("/projects/:id/move", validate(moveProjectSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    assertCompanyAccess(req, existing.companyId);
+
+    // Permission: only board users or CEO agents can move projects
+    if (req.actor.type === "agent") {
+      if (!req.actor.agentId) {
+        res.status(403).json({ error: "Agent authentication required" });
+        return;
+      }
+      const actorAgent = await agentsSvc.getById(req.actor.agentId);
+      if (!actorAgent || actorAgent.companyId !== existing.companyId) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (actorAgent.role !== "ceo" && !Boolean(actorAgent.permissions?.canCreateAgents)) {
+        res.status(403).json({ error: "Only CEO agents or company admins can move projects" });
+        return;
+      }
+    } else if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    // Validate access to target company
+    assertCompanyAccess(req, req.body.targetCompanyId);
+
+    const result = await svc.move(id, req.body);
+    const actor = getActorInfo(req);
+
+    await logActivity(db, {
+      companyId: result.sourceCompanyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "project.moved",
+      entityType: "project",
+      entityId: id,
+      details: {
+        sourceCompanyId: result.sourceCompanyId,
+        targetCompanyId: result.targetCompanyId,
+        movedIssues: result.movedIssues.map((m) => ({
+          id: m.id,
+          oldIdentifier: m.oldIdentifier,
+          newIdentifier: m.newIdentifier,
+          assigneeUnassigned: m.assigneeUnassigned,
+        })),
+      },
+    });
+
+    res.json(result.project);
   });
 
   router.delete("/projects/:id", async (req, res) => {
