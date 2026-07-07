@@ -8,3 +8,12 @@ coverage
 data
 tmp
 *.log
+.agents
+.claude
+doc
+docs
+evals
+releases
+report
+screenshots
+tests
